@@ -18,15 +18,15 @@ The engine provides:
 
 | Term | Definition |
 |------|------------|
-| **BDHKE** | Blind Diffie-Hellman Key Exchange. Cashu's blinding scheme: `B' = Hash_to_curve(x) + r*G`, `C' = k*B'`, `C = C' - r*K` |
+| **BDHKE** | Blind Diffie-Hellman Key Exchange. Cashu's blinding scheme: `B' = hash_to_curve(x) + r*G`, `C' = k*B'`, `C = C' - r*K`. Uses the `hash_to_curve` function from [[CashuNUT00]](#CashuNUT00) (try-and-increment with domain separator `Secp256k1_HashToCurve_Cashu_`) |
 | **Threshold OPRF** | Threshold Oblivious Pseudorandom Function. Distributes the BDHKE signing key `k` across `n` parties requiring `t` to cooperate to produce a valid response |
 | **DLEQ Proof** | Discrete Log Equality proof. Proves `log_G(S_i) == log_{B'}(C'_i)` without revealing the secret share `s_i` |
-| **Pedersen DKG** | The Distributed Key Generation protocol (from FROST RFC 9591) used to distribute shares of the group signing key `k` |
-| **FROST** | Used exclusively to refer to the Pedersen DKG phase. Not used to describe the signing phase, which is a Threshold OPRF |
+| **ChillDKG** | A distributed key generation protocol for FROST [[ChillDKG]](#ChillDKG), incorporating EncPedPop for encrypted share delivery via ECDH and CertEq for consensus via signature certificates. No trusted dealer required |
+| **CertEq** | Certificate-based equality check protocol. Each participant signs the DKG session transcript; the collection of all `n` valid signatures forms a *success certificate* proving agreement |
 | **DASoR** | Deterministic Authoritative Source of Randomness. The full protocol by which unbiasable random seeds are produced |
 | **Signing set** | The specific subset `S` of `t` players who respond to a given `RANDOMNESS_REQUEST` |
 | **Event DAG** | The directed acyclic graph of hash-linked Nostr events that encodes all game state |
-| **Group key** | The aggregated public key `K = Σ C_{i,0}` derived from all players' DKG Round 1 commitments |
+| **Group key** | The aggregated public key `K` derived from all players' DKG commitments |
 
 ---
 
@@ -46,7 +46,7 @@ No external authority exists. The player set collectively holds the group signin
 
 ### 4.1 Base Event Fields
 
-Every NutChain event is a standard Nostr event carrying these fields in addition to the Nostr base fields:
+Every NutChain event is a standard Nostr event. Per NIP-01, the `content` field is an arbitrary string. All structured data is serialized as stringified JSON within `content`. A future revision may migrate fields to Nostr tags for improved relay indexing.
 
 | Field | Description |
 |-------|-------------|
@@ -57,21 +57,24 @@ Every NutChain event is a standard Nostr event carrying these fields in addition
 
 ### 4.2 Event Kind Registry
 
+These kind numbers are provisional and occupy an unregistered sub-range of Nostr's addressable event space (`30000-39999`). A formal NIP may be proposed if this protocol is adopted more broadly.
+
 | Kind | Name | Phase | Description |
 |------|------|-------|-------------|
-| `30000` | `GAME_CREATE` | Setup | Genesis event. Encodes rules hash, player pubkeys, threshold parameters, and timeout |
-| `30001` | `PLAYER_JOIN` | Setup | Player accepts game invite. References `GAME_CREATE` |
-| `30010` | `DKG_ROUND_1` | Setup | Player publishes Feldman polynomial commitments and proof of knowledge |
-| `30011` | `DKG_ROUND_2` | Setup | Player publishes per-peer encrypted secret shares |
-| `30012` | `GAME_START` | Setup | Commits the group public key `K`. Game begins upon publication |
-| `30002` | `GAME_ACTION` | Gameplay | A player action. References its parent event to enforce turn ordering |
-| `30003` | `RANDOMNESS_REQUEST` | Gameplay | Player commits to `SHA-256(x)`, publishes blinded message `B'` and signing context |
-| `30004` | `TOPRF_PARTIAL` | Gameplay | A co-signer's partial evaluation `C'_i = s_i * B'` and DLEQ proof `π_i` |
-| `30005` | `RANDOMNESS_RESPONSE` | Gameplay | Requester publishes the aggregated blind signature `C'` |
-| `30006` | `RANDOMNESS_REVEAL` | Gameplay | Player reveals `x`, blinding factor `r`, and unblinded signature `C` |
-| `30007` | `COMMIT` | Gameplay | SHA-256 commitment for private game state |
-| `30008` | `REVEAL` | Gameplay | Preimage reveal for a prior `COMMIT` event |
-| `30009` | `GAME_END` | Teardown | Final state assertion. References the full event chain |
+| `30800` | `GAME_CREATE` | Setup | Genesis event. Encodes rules hash, player pubkeys, threshold parameters, and timeout |
+| `30801` | `PLAYER_JOIN` | Setup | Player accepts game invite. References `GAME_CREATE` |
+| `30810` | `DKG_ROUND_1` | Setup | Player publishes VSS commitments, proof of possession, encrypted shares, and ECDH ephemeral nonce |
+| `30811` | `DKG_ROUND_2` | Setup | Coordinator publishes aggregated commitments and per-participant encrypted share sums |
+| `30812` | `DKG_CERTIFY` | Setup | Player publishes CertEq signature over the session transcript |
+| `30813` | `GAME_START` | Setup | Commits the group public key `K` and the success certificate. Game begins upon publication |
+| `30802` | `GAME_ACTION` | Gameplay | A player action. References its parent event to enforce turn ordering |
+| `30803` | `RANDOMNESS_REQUEST` | Gameplay | Player commits to `SHA-256(x)`, publishes blinded message `B'` and signing context |
+| `30804` | `TOPRF_PARTIAL` | Gameplay | A co-signer's partial evaluation `C'_i = s_i * B'` and DLEQ proof `π_i` |
+| `30805` | `RANDOMNESS_RESPONSE` | Gameplay | Requester publishes the aggregated blind signature `C'` |
+| `30806` | `RANDOMNESS_REVEAL` | Gameplay | Player reveals `x`, blinding factor `r`, and unblinded signature `C` |
+| `30807` | `COMMIT` | Gameplay | SHA-256 commitment for private game state |
+| `30808` | `REVEAL` | Gameplay | Preimage reveal for a prior `COMMIT` event |
+| `30809` | `GAME_END` | Teardown | Final state assertion. References the full event chain |
 
 ---
 
@@ -82,9 +85,10 @@ Every NutChain event is a standard Nostr event carrying these fields in addition
  ────────────────────────────────────────────────────────────
  GAME_CREATE
    └── PLAYER_JOIN × n
-         └── DKG_ROUND_1 × n
-               └── DKG_ROUND_2 × n
-                     └── GAME_START  ◄─ group key K committed here
+         └── DKG_ROUND_1 × n        (EncPedPop: commitments + encrypted shares)
+               └── DKG_ROUND_2      (coordinator aggregation)
+                     └── DKG_CERTIFY × n   (CertEq signatures)
+                           └── GAME_START  ◄─ success certificate + group key K
 
  GAMEPLAY PHASE (repeating)
  ────────────────────────────────────────────────────────────
@@ -111,18 +115,8 @@ The founding player publishes the genesis event. All subsequent events reference
 
 ```json
 {
-  "kind": 30000,
-  "content": {
-    "rules_hash": "<sha256 of game rule implementation>",
-    "players": [
-      "<nostr pubkey 1>",
-      "<nostr pubkey 2>",
-      "<nostr pubkey n>"
-    ],
-    "frost_n": 4,
-    "frost_t": 3,
-    "turn_timeout_seconds": 300
-  },
+  "kind": 30800,
+  "content": "{\"rules_hash\": \"<sha256 of game rule implementation>\", \"players\": [\"<nostr pubkey 1>\", \"<nostr pubkey 2>\", \"<nostr pubkey n>\"], \"frost_n\": 4, \"frost_t\": 3, \"turn_timeout_seconds\": 300}",
   "tags": [["d", "<game_id>"]]
 }
 ```
@@ -131,7 +125,36 @@ The founding player publishes the genesis event. All subsequent events reference
 - `frost_t` — signing threshold: `floor(2n/3) + 1` (Byzantine majority, consistent with Fedimint). For `n=4`, `t=3`. For `n=3`, `t=3`. For `n=7`, `t=5`.
 - `turn_timeout_seconds` — after this duration without a required event from a player, any peer may declare forfeit.
 
-### 6.2 DKG Round 1
+#### Threshold and Fault Tolerance
+
+The threshold formula `t = floor(2n/3) + 1` determines how many players must cooperate for randomness generation and how many can be offline without blocking the game:
+
+| Players (n) | Threshold (t) | Fault tolerance (n - t) | Notes |
+|-------------|---------------|-------------------------|-------|
+| 2 | 2 | 0 | Unanimity — either player can block randomness |
+| 3 | 3 | 0 | Unanimity — same limitation |
+| 4 | 3 | 1 | **Minimum recommended for fault tolerance** |
+| 5 | 4 | 1 | |
+| 7 | 5 | 2 | |
+| 10 | 7 | 3 | |
+
+Games with `n < 4` operate under unanimity: any single player going offline blocks all randomness generation. The timeout/forfeit mechanism (Section 10) provides liveness in these cases, but it cannot prevent a losing player from forcing a forfeit rather than losing gracefully. **Minimum recommended `n` for meaningful fault tolerance is 4.**
+
+### 6.2 Distributed Key Generation (ChillDKG)
+
+NutChain uses the ChillDKG protocol [[ChillDKG]](#ChillDKG) for distributed key generation. ChillDKG is a standalone DKG protocol that requires no trusted dealer, no external secure channels, and no external consensus mechanism. It is built from three components:
+
+1. **SimplPedPop** — Feldman VSS with proofs of possession (Schnorr signatures on player index)
+2. **EncPedPop** — Wraps SimplPedPop with ephemeral-static ECDH encryption for secret share delivery
+3. **CertEq** — Equality check via signature certificates ensuring all players agree on the DKG transcript
+
+Each player holds a long-term host key pair (their Nostr key pair). The host secret key serves as both the ECDH decryption key for encrypted share delivery and the signing key for CertEq certificates.
+
+#### Security Note
+
+ChillDKG's security proof [[CGRS23]](#CGRS23) establishes composability with FROST Schnorr signing. NutChain uses the same DKG output — Feldman VSS shares of a group scalar over secp256k1 — for Threshold OPRF rather than FROST signing. While the DKG output is structurally identical, the composability argument from [[CGRS23]](#CGRS23) does not directly transfer to the OPRF setting. Formal security analysis of ChillDKG composed with Threshold OPRF is an open question. For the purposes of this specification — a game engine — this is considered acceptable.
+
+#### DKG Round 1 (EncPedPop Participant Broadcast)
 
 Each player `i` independently generates a random polynomial `f_i(x)` of degree `t-1` over the scalar field:
 
@@ -139,116 +162,103 @@ Each player `i` independently generates a random polynomial `f_i(x)` of degree `
 f_i(x) = a_{i,0} + a_{i,1}*x + ... + a_{i,t-1}*x^{t-1}
 ```
 
-The constant term `a_{i,0}` becomes player `i`'s contribution to the group secret. Player `i` publishes:
+The constant term `a_{i,0}` becomes player `i`'s contribution to the group secret. Player `i` computes:
 
-- **Feldman commitments:** `C_{i,k} = a_{i,k} * G` for `k = 0..t-1`
-- **Proof of knowledge** of `a_{i,0}`: a Schnorr signature `(R, s)` over the player's index and commitments, binding the polynomial to the player's Nostr key. This prevents rogue key attacks.
+- **Feldman VSS commitments:** `com_{i,k} = a_{i,k} * G` for `k = 0..t-1`
+- **Proof of possession:** A BIP-340 Schnorr signature on message `i` with secret key `a_{i,0}`, preventing rogue-key attacks
+- **Ephemeral ECDH nonce:** A fresh key pair `(ek_i, EK_i)` for encrypting secret shares
+- **Encrypted shares:** For each peer `j`, the VSS share `f_i(j+1)` encrypted via ECDH between `ek_i` and `j`'s host public key, producing a shared pad `pad_{ij}`. The encrypted share is `f_i(j+1) + pad_{ij}`
+
+All of this is published in a single `DKG_ROUND_1` event:
 
 ```json
 {
-  "kind": 30010,
-  "content": {
-    "game_id": "<game_id>",
-    "player_index": 1,
-    "commitments": [
-      "<hex-encoded point C_{i,0}>",
-      "<hex-encoded point C_{i,1}>",
-      "<hex-encoded point C_{i,t-1}>"
-    ],
-    "proof_of_knowledge": {
-      "R": "<hex-encoded point>",
-      "s": "<hex-encoded scalar>"
-    }
-  },
+  "kind": 30810,
+  "content": "{\"game_id\": \"<game_id>\", \"player_index\": 0, \"commitments\": [\"<hex com_{i,0}>\", \"<hex com_{i,1}>\"], \"proof_of_possession\": \"<hex BIP-340 signature>\", \"ecdh_pubkey\": \"<hex EK_i>\", \"encrypted_shares\": [{\"recipient_index\": 1, \"share\": \"<hex encrypted f_i(2)>\"}, {\"recipient_index\": 2, \"share\": \"<hex encrypted f_i(3)>\"}]}",
   "tags": [["e", "<GAME_CREATE event id>"], ["d", "<game_id>"]]
 }
 ```
 
-Each player verifies all peers' proofs of knowledge before proceeding to Round 2.
+#### DKG Round 2 (Coordinator Aggregation)
 
-### 6.3 DKG Round 2
+Any player can act as the coordinator. The coordinator collects all `n` `DKG_ROUND_1` events and aggregates:
 
-Each player `i` computes a secret share for each peer `j` by evaluating their polynomial at index `j`:
+- **Concatenated first commitments:** `coms_to_secrets = (com_{0,0}, ..., com_{n-1,0})`
+- **Summed non-constant commitments:** Component-wise sum of `com_{i,k}` for `k = 1..t-1` across all `i`
+- **Per-participant encrypted share sums:** For each participant `j`, the sum of all encrypted shares intended for `j`
 
-```
-share_{i→j} = f_i(j)
-```
-
-This value is encrypted to `j`'s Nostr public key (NIP-44 encrypted direct message semantics) so only `j` can read it. All encrypted shares are broadcast in a single `DKG_ROUND_2` event:
+The coordinator publishes a `DKG_ROUND_2` event:
 
 ```json
 {
-  "kind": 30011,
-  "content": {
-    "game_id": "<game_id>",
-    "player_index": 1,
-    "shares": [
-      {
-        "recipient_index": 2,
-        "recipient_pubkey": "<nostr pubkey>",
-        "encrypted_share": "<NIP-44 ciphertext of f_i(2)>"
-      },
-      {
-        "recipient_index": 3,
-        "recipient_pubkey": "<nostr pubkey>",
-        "encrypted_share": "<NIP-44 ciphertext of f_i(3)>"
-      }
-    ]
-  },
-  "tags": [
-    ["e", "<DKG_ROUND_1 event id of this player>"],
-    ["d", "<game_id>"]
-  ]
+  "kind": 30811,
+  "content": "{\"game_id\": \"<game_id>\", \"coms_to_secrets\": [\"<hex com_{0,0}>\", \"<hex com_{1,0}>\", \"<hex com_{2,0}>\", \"<hex com_{3,0}>\"], \"sum_coms_nonconst\": [\"<hex sum of k=1 terms>\"], \"encrypted_share_sums\": [{\"recipient_index\": 0, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 1, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 2, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 3, \"enc_secshare\": \"<hex>\"}], \"proofs_of_possession\": [\"<hex pop_0>\", \"<hex pop_1>\", \"<hex pop_2>\", \"<hex pop_3>\"], \"ecdh_pubkeys\": [\"<hex EK_0>\", \"<hex EK_1>\", \"<hex EK_2>\", \"<hex EK_3>\"]}",
+  "tags": [["e", "<GAME_CREATE event id>"], ["d", "<game_id>"]]
 }
 ```
 
-Upon receiving all peers' `DKG_ROUND_2` events, each player `j`:
+Upon receiving `DKG_ROUND_2`, each player `j`:
 
-**Verifies** each received share against the sender's Round 1 commitments:
-```
-share_{i→j} * G == Σ_{k=0}^{t-1} C_{i,k} * j^k
-```
-A share that fails verification indicates a misbehaving peer. Abort and surface the invalid `DKG_ROUND_2` event as evidence.
+**Verifies** every proof of possession `pop_i` using message `i` and public key `coms_to_secrets[i]`. If any is invalid, abort and blame that player.
 
-**Derives** their final secret share by summing all received shares:
+**Derives** all ECDH pads `pad_{ij}` using the ephemeral public keys `EK_i` and their own host secret key, then decrypts their secret share:
 ```
-s_j = Σ_i share_{i→j}
+secshare_j = enc_secshare_j - (pad_{0j} + pad_{1j} + ... + pad_{(n-1)j})
 ```
 
-`s_j` is never published. It is the player's long-term secret for this game.
-
-**Derives** the group public key (computable by anyone from Round 1 events):
+**Reconstructs** the full summed VSS commitment:
 ```
-K = Σ_i C_{i,0}
-```
-
-**Derives** their public key share (also computable by anyone):
-```
-S_j = s_j * G  ==  Σ_i Σ_{k=0}^{t-1} C_{i,k} * j^k
+sum_coms[0] = Σ_i coms_to_secrets[i]
+sum_coms[k] = sum_coms_nonconst[k-1]   for k = 1..t-1
 ```
 
-### 6.4 GAME_START
+**Verifies** their secret share against the summed commitments:
+```
+secshare_j * G == Σ_{k=0}^{t-1} sum_coms[k] * (j+1)^k
+```
+If verification fails, the player requests individual encrypted shares from the coordinator to identify the misbehaving peer.
 
-Any player publishes `GAME_START` once all `DKG_ROUND_2` events are present and verified:
+**Derives** the group public key:
+```
+K = sum_coms[0]
+```
+
+**Derives** all public key shares (computable by anyone):
+```
+S_j = Σ_{k=0}^{t-1} sum_coms[k] * (j+1)^k
+```
+
+#### DKG Certification (CertEq)
+
+Each player constructs the session transcript — a deterministic serialization of all DKG protocol data including the summed commitments, all ECDH public keys, and all encrypted share sums — and signs it with their host secret key.
+
+Each player publishes a `DKG_CERTIFY` event:
 
 ```json
 {
-  "kind": 30012,
-  "content": {
-    "game_id": "<game_id>",
-    "group_pubkey": "<hex-encoded point K>",
-    "dkg_round_2_event_ids": [
-      "<event id>",
-      "<event id>",
-      "<event id>",
-      "<event id>"
-    ]
-  },
+  "kind": 30812,
+  "content": "{\"game_id\": \"<game_id>\", \"player_index\": 0, \"transcript_hash\": \"<SHA-256 of session transcript>\", \"certeq_signature\": \"<hex BIP-340 signature on transcript>\"}",
+  "tags": [["e", "<DKG_ROUND_2 event id>"], ["d", "<game_id>"]]
+}
+```
+
+A player finalizes the DKG when they have collected valid CertEq signatures from all `n` players. This collection of `n` signatures constitutes the **success certificate** — proof that all players agree on the DKG outcome.
+
+### 6.3 GAME_START
+
+Any player publishes `GAME_START` once the success certificate is complete:
+
+```json
+{
+  "kind": 30813,
+  "content": "{\"game_id\": \"<game_id>\", \"group_pubkey\": \"<hex K>\", \"success_certificate\": [\"<hex certeq_sig_0>\", \"<hex certeq_sig_1>\", \"<hex certeq_sig_2>\", \"<hex certeq_sig_3>\"], \"transcript_hash\": \"<SHA-256 of session transcript>\"}",
   "tags": [["e", "<GAME_CREATE event id>"], ["d", "<game_id>"]]
 }
 ```
 
 `K` is immutable for the lifetime of the game. No key changes are permitted after `GAME_START` is published. Game rules begin applying to events published after this point.
+
+Any verifier can validate the success certificate by checking each CertEq signature against the corresponding player's host public key and the transcript hash.
 
 ---
 
@@ -287,12 +297,12 @@ The DASoR protocol produces random seeds that are unbiasable by any individual p
 
 **BDHKE (Cashu):**
 
-The base single-signer scheme:
+The base single-signer scheme, using `hash_to_curve` as defined in [[CashuNUT00]](#CashuNUT00) (try-and-increment with domain separator `Secp256k1_HashToCurve_Cashu_`):
 ```
-Blinding:   B' = Hash_to_curve(x) + r*G
+Blinding:   B' = hash_to_curve(x) + r*G
 Signing:    C' = k * B'
-Unblinding: C  = C' - r*K  =  k * Hash_to_curve(x)
-Verify:     C  == k * Hash_to_curve(x)  using public key K = k*G
+Unblinding: C  = C' - r*K  =  k * hash_to_curve(x)
+Verify:     C  == k * hash_to_curve(x)  using public key K = k*G
 ```
 
 `C` is a deterministic function of `x` and `k`. Neither `x` (known only to the player) nor `k` (held as shares across players) alone determines the output.
@@ -307,14 +317,14 @@ The multi-signer extension. Each player `i` holds a secret share `s_i` of the gr
 
 **Why not FROST Schnorr?**
 
-FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requires the multiplicative structure `C = C' - r*K`, which only holds when `C' = k * B'`. A Schnorr signature over `B'` cannot be unblinded into `k * Hash_to_curve(x)`. The Threshold OPRF preserves this structure. FROST's Pedersen DKG is reused for key distribution, but the signing protocol is distinct.
+FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requires the multiplicative structure `C = C' - r*K`, which only holds when `C' = k * B'`. A Schnorr signature over `B'` cannot be unblinded into `k * hash_to_curve(x)`. The Threshold OPRF preserves this structure. ChillDKG is reused for key distribution, but the signing protocol is distinct.
 
 ### 8.2 Security Properties
 
 | Property | Mechanism |
 |----------|-----------|
 | No single player can bias the outcome | Threshold OPRF: `t` colluders required to control `k` |
-| Requester cannot bias the outcome | Requester controls `x` but not `k`; cannot evaluate `k*Hash_to_curve(x)` without co-signers |
+| Requester cannot bias the outcome | Requester controls `x` but not `k`; cannot evaluate `k*hash_to_curve(x)` without co-signers |
 | Co-signers cannot bias the outcome | Co-signers sign the blinded `B'` without knowing `x`; cannot evaluate the result |
 | Grinding is mitigated | `SHA-256(x)` committed on-chain before any partial response is returned |
 | Tokens are context-bound | Each signing request commits to `(game_id, turn, action_type, parent_event_hash)` |
@@ -325,13 +335,13 @@ FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requi
 ```
 1. Player generates secret x  (uniformly random, e.g. 32 bytes from CSPRNG)
 
-2. Player publishes RANDOMNESS_REQUEST:
+2. Player publishes RANDOMNESS_REQUEST (kind 30803):
      commitment = SHA-256(x)
-     B'         = Hash_to_curve(x) + r*G    (r = secret blinding factor)
-     context    = SHA-256(game_id || turn_number || action_type || parent_event_hash)
+     B'         = hash_to_curve(x) + r*G    (r = secret blinding factor)
+     context    = SHA-256("NUTCHAIN_CTX_v1" || game_id || turn_number || action_type || parent_event_hash)
      num_values = number of derived random values this action will consume
 
-3. Each co-signer i in signing set S (|S| = t) publishes TOPRF_PARTIAL:
+3. Each co-signer i in signing set S (|S| = t) publishes TOPRF_PARTIAL (kind 30804):
      C'_i = s_i * B'
      π_i  = DLEQ proof that C'_i is consistent with S_i = s_i*G
 
@@ -340,29 +350,63 @@ FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requi
      Applies Lagrange interpolation to reconstruct:
        C' = Σ_{i∈S} λ_i * C'_i
 
-5. Requester publishes RANDOMNESS_RESPONSE:
+5. Requester publishes RANDOMNESS_RESPONSE (kind 30805):
      C' = aggregated blind evaluation
 
-6. Requester publishes RANDOMNESS_REVEAL:
+6. Requester publishes RANDOMNESS_REVEAL (kind 30806):
      x  = original secret
      r  = blinding factor
      C  = C' - r*K     (unblinded result)
 
 7. Verification (anyone):
-     Check: SHA-256(x) matches commitment in RANDOMNESS_REQUEST
-     Check: Hash_to_curve(x)*K_scalar == C  ← restate as: verify C against K and x
-     Formally: C is valid iff the discrete log of C w.r.t. Hash_to_curve(x) equals
-               the discrete log of K w.r.t. G
+     a. Check SHA-256(x) matches commitment in RANDOMNESS_REQUEST
+     b. Recompute C' from published TOPRF_PARTIAL events:
+        - For each TOPRF_PARTIAL, verify its DLEQ proof π_i against
+          the signer's public key share S_i (derivable from DKG commitments)
+        - Apply Lagrange interpolation over t valid partials
+        - Check the recomputed C' matches the C' in RANDOMNESS_RESPONSE
+     c. Compute C = C' - r*K using the revealed r and group pubkey K
+     d. Check C matches the value in RANDOMNESS_REVEAL
 
 8. Seed derivation:
-     seed = SHA-256(C.x_coordinate || context)
+     seed = SHA-256("NUTCHAIN_SEED_v1" || C.x_coordinate || context)
+```
+
+#### RANDOMNESS_REQUEST Event Schema
+
+```json
+{
+  "kind": 30803,
+  "content": "{\"game_id\": \"<game_id>\", \"commitment\": \"<hex SHA-256(x)>\", \"blinded_message\": \"<hex B'>\", \"context\": \"<hex context hash>\", \"num_values\": 1}",
+  "tags": [["e", "<parent event id>"], ["d", "<game_id>"]]
+}
+```
+
+#### RANDOMNESS_RESPONSE Event Schema
+
+```json
+{
+  "kind": 30805,
+  "content": "{\"game_id\": \"<game_id>\", \"randomness_request_event_id\": \"<event id>\", \"aggregated_blind_signature\": \"<hex C'>\"}",
+  "tags": [["e", "<RANDOMNESS_REQUEST event id>"], ["d", "<game_id>"]]
+}
+```
+
+#### RANDOMNESS_REVEAL Event Schema
+
+```json
+{
+  "kind": 30806,
+  "content": "{\"game_id\": \"<game_id>\", \"randomness_request_event_id\": \"<event id>\", \"secret\": \"<hex x>\", \"blinding_factor\": \"<hex r>\", \"unblinded_signature\": \"<hex C>\"}",
+  "tags": [["e", "<RANDOMNESS_RESPONSE event id>"], ["d", "<game_id>"]]
+}
 ```
 
 ### 8.4 Threshold OPRF Signing Detail
 
 #### DLEQ Proof
 
-A DLEQ (Discrete Log Equality) proof demonstrates that the same secret scalar `s_i` was used in both `S_i = s_i * G` and `C'_i = s_i * B'`, without revealing `s_i`. Public key shares `S_i` are computable by anyone from the DKG Round 1 commitments.
+A DLEQ (Discrete Log Equality) proof demonstrates that the same secret scalar `s_i` was used in both `S_i = s_i * G` and `C'_i = s_i * B'`, without revealing `s_i`. Public key shares `S_i` are computable by anyone from the DKG commitments.
 
 **Construction (Sigma protocol, non-interactive via Fiat-Shamir):**
 
@@ -409,22 +453,9 @@ The choice of signing set `S` does not affect the result — any `t` valid parti
 
 ```json
 {
-  "kind": 30004,
-  "content": {
-    "game_id": "<game_id>",
-    "randomness_request_event_id": "<event id of RANDOMNESS_REQUEST>",
-    "player_index": 2,
-    "partial_response": "<hex-encoded point C'_i>",
-    "public_key_share": "<hex-encoded point S_i>",
-    "dleq_proof": {
-      "e": "<hex-encoded scalar>",
-      "s": "<hex-encoded scalar>"
-    }
-  },
-  "tags": [
-    ["e", "<RANDOMNESS_REQUEST event id>"],
-    ["d", "<game_id>"]
-  ]
+  "kind": 30804,
+  "content": "{\"game_id\": \"<game_id>\", \"randomness_request_event_id\": \"<event id of RANDOMNESS_REQUEST>\", \"player_index\": 2, \"partial_response\": \"<hex C'_i>\", \"public_key_share\": \"<hex S_i>\", \"dleq_proof\": {\"e\": \"<hex scalar>\", \"s\": \"<hex scalar>\"}}",
+  "tags": [["e", "<RANDOMNESS_REQUEST event id>"], ["d", "<game_id>"]]
 }
 ```
 
@@ -433,12 +464,12 @@ The choice of signing set `S` does not affect the result — any `t` valid parti
 When a single game action requires multiple independent random values, they are derived from one seed using a counter. The number of values must be declared in `num_values` within `RANDOMNESS_REQUEST` so co-signers and verifiers know the full scope of the request.
 
 ```
-seed    = SHA-256(C.x_coordinate || context)
-value_0 = SHA-256(seed || 0x00000000)
-value_1 = SHA-256(seed || 0x00000001)
-value_2 = SHA-256(seed || 0x00000002)
+seed    = SHA-256("NUTCHAIN_SEED_v1" || C.x_coordinate || context)
+value_0 = SHA-256("NUTCHAIN_VAL_v1" || seed || 0x00000000)
+value_1 = SHA-256("NUTCHAIN_VAL_v1" || seed || 0x00000001)
+value_2 = SHA-256("NUTCHAIN_VAL_v1" || seed || 0x00000002)
 ...
-value_k = SHA-256(seed || k as big-endian uint32)
+value_k = SHA-256("NUTCHAIN_VAL_v1" || seed || k as big-endian uint32)
 ```
 
 To map a value to a range `[0, N)`:
@@ -468,7 +499,7 @@ All `RANDOMNESS_REQUEST` events are permanently on-chain. Repeated requests agai
 Each randomness token is cryptographically bound to a unique game context:
 
 ```
-context = SHA-256(game_id || turn_number || action_type || parent_event_hash)
+context = SHA-256("NUTCHAIN_CTX_v1" || game_id || turn_number || action_type || parent_event_hash)
 ```
 
 Co-signers must verify the context in `RANDOMNESS_REQUEST` matches the current game state before producing a partial response. A `TOPRF_PARTIAL` produced for an invalid or stale context is itself invalid.
@@ -484,12 +515,22 @@ Verifiers reject `RANDOMNESS_REVEAL` events whose context does not match the gam
 **Lagrange coefficients at 0** (mod group order `q`):
 
 ```
-λ_1 = ((0-2)/(1-2)) * ((0-3)/(1-3))  =  (-2/-1) * (-3/-2)  =  2 * (3/2)  =  3
-λ_2 = ((0-1)/(2-1)) * ((0-3)/(2-3))  =  (-1/1)  * (-3/-1)  = -1 *  3     = -3
-λ_3 = ((0-1)/(3-1)) * ((0-2)/(3-2))  =  (-1/2)  * (-2/1)   =  1
+λ_1 = (0-2)/(1-2) * (0-3)/(1-3)
+    = (-2)/(-1) * (-3)/(-2)
+    = 2 * 3/2
+    = 3
+
+λ_2 = (0-1)/(2-1) * (0-3)/(2-3)
+    = (-1)/(1) * (-3)/(-1)
+    = -1 * 3
+    = -3
+
+λ_3 = (0-1)/(3-1) * (0-2)/(3-2)
+    = (-1)/(2) * (-2)/(1)
+    = 1
 ```
 
-*Division is modular inverse over the group order. Check: 3 + (-3) + 1 = 1 ✓*
+*All division is modular inverse over the group order `q`. Sanity check: `λ_1 + λ_2 + λ_3 = 3 + (-3) + 1 = 1 ✓`*
 
 **Reconstruction:**
 
@@ -500,13 +541,13 @@ C' = 3*C'_1 + (-3)*C'_2 + 1*C'_3
 **Full flow:**
 
 ```
-Player 1 generates x, computes B' = Hash_to_curve(x) + r*G
+Player 1 generates x, computes B' = hash_to_curve(x) + r*G
 Player 1 publishes RANDOMNESS_REQUEST (commitment, B', context)
 
 Player 1 computes C'_1 = s_1 * B', generates π_1, publishes TOPRF_PARTIAL
 Player 2 computes C'_2 = s_2 * B', generates π_2, publishes TOPRF_PARTIAL
 Player 3 computes C'_3 = s_3 * B', generates π_3, publishes TOPRF_PARTIAL
-(Player 4 offline — not needed)
+(Player 4 offline — not needed, t=3 satisfied)
 
 Player 1 verifies π_1, π_2, π_3 against S_1, S_2, S_3
 Player 1 computes C' = 3*C'_1 - 3*C'_2 + 1*C'_3
@@ -516,10 +557,11 @@ Player 1 computes C = C' - r*K
 Player 1 publishes RANDOMNESS_REVEAL (x, r, C)
 
 Anyone verifies:
-  SHA-256(x) matches RANDOMNESS_REQUEST commitment  ✓
-  C is a valid BDHKE unblinding of C' under K        ✓
+  a. SHA-256(x) matches RANDOMNESS_REQUEST commitment        ✓
+  b. Recompute C' from TOPRF_PARTIAL events via Lagrange     ✓
+  c. C = C' - r*K matches RANDOMNESS_REVEAL                  ✓
 
-seed = SHA-256(C.x_coordinate || context)
+seed = SHA-256("NUTCHAIN_SEED_v1" || C.x_coordinate || context)
 ```
 
 ---
@@ -532,11 +574,8 @@ Players may maintain hidden state using SHA-256 commit-reveal pairs published as
 
 ```json
 {
-  "kind": 30007,
-  "content": {
-    "game_id": "<game_id>",
-    "commitment": "<SHA-256(secret || nonce)>"
-  },
+  "kind": 30807,
+  "content": "{\"game_id\": \"<game_id>\", \"commitment\": \"<SHA-256(secret || nonce)>\"}",
   "tags": [["e", "<parent event id>"], ["d", "<game_id>"]]
 }
 ```
@@ -547,13 +586,8 @@ The `nonce` must be uniformly random (minimum 16 bytes) to prevent preimage reco
 
 ```json
 {
-  "kind": 30008,
-  "content": {
-    "game_id": "<game_id>",
-    "secret": "<plaintext>",
-    "nonce": "<hex>",
-    "commit_event_id": "<event id of COMMIT>"
-  },
+  "kind": 30808,
+  "content": "{\"game_id\": \"<game_id>\", \"secret\": \"<plaintext>\", \"nonce\": \"<hex>\", \"commit_event_id\": \"<event id of COMMIT>\"}",
   "tags": [["e", "<COMMIT event id>"], ["d", "<game_id>"]]
 }
 ```
@@ -590,13 +624,14 @@ When a forfeit condition is met, any peer may publish `GAME_END` citing the time
 | Single player biases randomness | Threshold OPRF: biasing `C'` requires controlling `t` secret shares |
 | Requesting player grinds for favorable `x` | Public `SHA-256(x)` commitment precedes any partial response; abandonment triggers forfeit |
 | Co-signer produces invalid partial response | DLEQ proof is published alongside `C'_i`; invalid proofs are verifiably rejected |
-| Token reused across game contexts | Context field `SHA-256(game_id || turn || action_type || parent_event_hash)` is part of the signing commitment |
+| Token reused across game contexts | Context field `SHA-256("NUTCHAIN_CTX_v1" \|\| game_id \|\| turn \|\| action_type \|\| parent_event_hash)` uniquely binds each token |
 | Player abandons after learning seed | Timeout + forfeit; outcome of revealed seed is recorded in `RANDOMNESS_REVEAL` on-chain |
 | Coalition of `t-1` players colludes | Insufficient shares to reconstruct `k`; OPRF output is computationally indistinguishable from random |
 | Coalition of `t` or more players colludes | Threshold does not prevent this; `t = floor(2n/3) + 1` makes this a strict Byzantine majority |
 | Event ordering dispute | Parent hash chain is canonical; fork resolution by timestamp then event ID; forks are preserved as evidence |
 | Forged game state | All events are Nostr-signed; state is derived deterministically from the auditable public event DAG |
-| DKG participant publishes invalid shares | Share verification against Feldman commitments detects cheating; invalid `DKG_ROUND_2` is on-chain evidence |
+| DKG participant publishes invalid shares | Share verification against Feldman commitments detects cheating; CertEq ensures all players agree on the DKG outcome |
+| DKG participant withholds CertEq signature | DKG cannot finalize without all `n` signatures; game does not start; no funds at risk |
 
 ---
 
@@ -607,17 +642,16 @@ When a forfeit condition is met, any peer may publish `GAME_END` citing the time
 | Primitive | Specification |
 |-----------|---------------|
 | Elliptic curve | Secp256k1 (consistent with Nostr and Bitcoin) |
-| Hash to curve | `Hash_to_curve` per [[RFC9380]](#RFC9380) using secp256k1 |
-| Pedersen DKG | [[RFC9591]](#RFC9591), Section 4 |
+| Hash to curve | `hash_to_curve` per [[CashuNUT00]](#CashuNUT00) (try-and-increment, domain separator `Secp256k1_HashToCurve_Cashu_`) |
+| Distributed key generation | [[ChillDKG]](#ChillDKG) (EncPedPop + CertEq) |
 | BDHKE | [[CashuNUT00]](#CashuNUT00) |
 | DLEQ proofs | Chaum-Pedersen protocol [[ChaumPedersen93]](#ChaumPedersen93), non-interactive via Fiat-Shamir with domain separator `"NUTCHAIN_DLEQ_v1"`. Normative pseudocode in [[RFC9497]](#RFC9497) Section 2.2 |
 | Threshold OPRF | [[JKKX17]](#JKKX17) |
-| Event encryption | NIP-44 (for encrypted DKG shares) |
 | General hashing | SHA-256 |
 
 ### Domain Separation
 
-All hash operations in NutChain are domain-separated with a unique prefix string to prevent cross-protocol attacks:
+All hash operations in NutChain are domain-separated to prevent cross-protocol attacks:
 
 | Context | Domain Separator |
 |---------|-----------------|
@@ -628,10 +662,10 @@ All hash operations in NutChain are domain-separated with a unique prefix string
 
 ### Public Key Share Derivation
 
-Public key shares `S_j` are computable by any verifier from the published DKG Round 1 commitments, without any private information:
+Public key shares `S_j` are computable by any verifier from the DKG commitments, without any private information:
 
 ```
-S_j = Σ_i Σ_{k=0}^{t-1} C_{i,k} * j^k
+S_j = Σ_{k=0}^{t-1} sum_coms[k] * (j+1)^k
 ```
 
 This means DLEQ proofs in `TOPRF_PARTIAL` events are fully verifiable by any observer, not just the game participants.
@@ -648,7 +682,7 @@ David Chaum and Torben Pryds Pedersen.
 *CRYPTO 1992*, LNCS 740, pp. 89–105.
 https://link.springer.com/chapter/10.1007/3-540-48071-4_7
 
-Introduces the DLEQ sigma protocol (Section 8.4). Proves zero-knowledge by Jarecki et al. in [JKKX17]; made non-interactive via Fiat-Shamir.
+Introduces the DLEQ sigma protocol used in Section 8.4. Zero-knowledge follows from standard sigma-protocol analysis. Made non-interactive via the Fiat-Shamir transform. [[JKKX17]](#JKKX17) proves UC security of the Threshold OPRF construction that builds on this proof.
 
 ---
 
@@ -672,6 +706,16 @@ Extends threshold OPRFs to the partially-oblivious setting, where a public input
 
 ---
 
+**[CGRS23]** <a name="CGRS23"></a>
+Chu, Gerhart, Ruffing, and Schröder.
+"Practical Schnorr Threshold Signatures Without the Algebraic Group Model."
+Cryptology ePrint Archive, Paper 2023/899.
+https://ia.cr/2023/899
+
+Security proof for PedPop (the DKG underlying ChillDKG) composed with FROST. Establishes that SimplPedPop is secure when combined with FROST signing. See Section 6.2 for discussion of the open question regarding composability with Threshold OPRF.
+
+---
+
 ### Standards and Specifications
 
 **[RFC9497]** <a name="RFC9497"></a>
@@ -680,27 +724,7 @@ A. Davidson, A. Faz-Hernandez, N. Sullivan, C. A. Wood.
 IRTF CFRG, December 2023.
 https://www.rfc-editor.org/rfc/rfc9497
 
-Normative reference for the single-signer VOPRF and the DLEQ proof construction (Section 2.2 of the RFC, referenced in Section 8.4 of this spec). The threshold extension is not covered by this RFC; see [JKKX17].
-
----
-
-**[RFC9591]** <a name="RFC9591"></a>
-D. Connolly, C. Komlo, I. Goldberg, C. A. Wood.
-"The Flexible Round-Optimized Schnorr Threshold (FROST) Signature Scheme."
-IRTF CFRG, June 2024.
-https://www.rfc-editor.org/rfc/rfc9591
-
-Reference for the Pedersen DKG protocol used in Sections 6.2 and 6.3.
-
----
-
-**[RFC9380]** <a name="RFC9380"></a>
-A. Faz-Hernandez, S. Scott, N. Sullivan, R. Wahby, C. Wood.
-"Hashing to Elliptic Curves."
-IRTF CFRG, August 2023.
-https://www.rfc-editor.org/rfc/rfc9380
-
-Specifies `Hash_to_curve` used in BDHKE blinding (Section 8.1).
+Normative reference for the single-signer VOPRF and the DLEQ proof construction (Section 2.2 of the RFC, referenced in Section 8.4 of this spec). The threshold extension is not covered by this RFC; see [[JKKX17]](#JKKX17).
 
 ---
 
@@ -709,7 +733,7 @@ Cashu contributors.
 "NUT-00: Notation, Utilization, and Terminology."
 https://github.com/cashubtc/nuts/blob/main/00.md
 
-Specifies the BDHKE scheme that forms the single-signer base of the DASoR protocol (Section 8.1).
+Specifies the BDHKE scheme and `hash_to_curve` function that form the single-signer base of the DASoR protocol (Section 8.1).
 
 ---
 
@@ -719,6 +743,16 @@ Cashu contributors.
 https://github.com/cashubtc/nuts/blob/main/12.md
 
 Specifies DLEQ proofs for single-signer Cashu blind signatures — the single-server baseline from which the threshold construction in Section 8.4 is derived.
+
+---
+
+**[ChillDKG]** <a name="ChillDKG"></a>
+Tim Ruffing, Jonas Nick, and Sivaram Dhakshinamoorthy.
+"ChillDKG: Distributed Key Generation for FROST."
+BIP draft (Blockstream Research).
+https://github.com/BlockstreamResearch/bip-frost-dkg
+
+Standalone DKG protocol requiring no trusted dealer, no external secure channels, and no external consensus mechanism. Incorporates EncPedPop (ECDH-encrypted share delivery) and CertEq (signature-certificate-based agreement). Referenced in Section 6.2.
 
 ---
 
@@ -735,4 +769,6 @@ Production implementation of threshold blind signatures using Feldman secret sha
 
 ### Note on Standardization Status
 
-The threshold extension of OPRF — distributing the signing key across multiple parties via Feldman secret sharing and reconstructing via Lagrange interpolation — is described in [[JKKX17]](#JKKX17) and implemented in [[Fedimint]](#Fedimint), but does not yet have a finalized IETF RFC. [RFC9497] covers only the single-signer case. Implementers of the DASoR protocol should treat [[JKKX17]](#JKKX17) as the primary cryptographic reference and [[Fedimint]](#Fedimint) as the primary implementation reference for the threshold variant.
+The threshold extension of OPRF — distributing the signing key across multiple parties via Feldman secret sharing and reconstructing via Lagrange interpolation — is described in [[JKKX17]](#JKKX17) and implemented in [[Fedimint]](#Fedimint), but does not yet have a finalized IETF RFC. [[RFC9497]](#RFC9497) covers only the single-signer case. Implementers of the DASoR protocol should treat [[JKKX17]](#JKKX17) as the primary cryptographic reference and [[Fedimint]](#Fedimint) as the primary implementation reference for the threshold variant.
+
+ChillDKG [[ChillDKG]](#ChillDKG) is a BIP draft and not yet finalized. Its security proof [[CGRS23]](#CGRS23) covers composition with FROST Schnorr signing; composition with Threshold OPRF is an open question (see Section 6.2).
