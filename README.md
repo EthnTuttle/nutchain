@@ -607,10 +607,11 @@ When a forfeit condition is met, any peer may publish `GAME_END` citing the time
 | Primitive | Specification |
 |-----------|---------------|
 | Elliptic curve | Secp256k1 (consistent with Nostr and Bitcoin) |
-| Hash to curve | `Hash_to_curve` per [RFC 9380](https://www.rfc-editor.org/rfc/rfc9380) using secp256k1 |
-| Pedersen DKG | [FROST RFC 9591](https://www.rfc-editor.org/rfc/rfc9591), Section 4 |
-| BDHKE | [Cashu NUT-00](https://github.com/cashubtc/nuts/blob/main/00.md) |
-| DLEQ proofs | Chaum-Pedersen protocol, non-interactive via Fiat-Shamir with domain separator `"NUTCHAIN_DLEQ_v1"` |
+| Hash to curve | `Hash_to_curve` per [[RFC9380]](#RFC9380) using secp256k1 |
+| Pedersen DKG | [[RFC9591]](#RFC9591), Section 4 |
+| BDHKE | [[CashuNUT00]](#CashuNUT00) |
+| DLEQ proofs | Chaum-Pedersen protocol [[ChaumPedersen93]](#ChaumPedersen93), non-interactive via Fiat-Shamir with domain separator `"NUTCHAIN_DLEQ_v1"`. Normative pseudocode in [[RFC9497]](#RFC9497) Section 2.2 |
+| Threshold OPRF | [[JKKX17]](#JKKX17) |
 | Event encryption | NIP-44 (for encrypted DKG shares) |
 | General hashing | SHA-256 |
 
@@ -634,3 +635,104 @@ S_j = Σ_i Σ_{k=0}^{t-1} C_{i,k} * j^k
 ```
 
 This means DLEQ proofs in `TOPRF_PARTIAL` events are fully verifiable by any observer, not just the game participants.
+
+---
+
+## 13. References
+
+### Academic Literature
+
+**[ChaumPedersen93]** <a name="ChaumPedersen93"></a>
+David Chaum and Torben Pryds Pedersen.
+"Wallet Databases with Observers."
+*CRYPTO 1992*, LNCS 740, pp. 89–105.
+https://link.springer.com/chapter/10.1007/3-540-48071-4_7
+
+Introduces the DLEQ sigma protocol (Section 8.4). Proves zero-knowledge by Jarecki et al. in [JKKX17]; made non-interactive via Fiat-Shamir.
+
+---
+
+**[JKKX17]** <a name="JKKX17"></a>
+Stanislaw Jarecki, Aggelos Kiayias, Hugo Krawczyk, and Jiayu Xu.
+"TOPPSS: Cost-minimal Password-Protected Secret Sharing based on Threshold OPRF."
+*ACNS 2017*. Cryptology ePrint Archive, Paper 2017/363.
+https://ia.cr/2017/363
+
+Primary academic reference for the Threshold OPRF construction in Section 8. Introduces the T-OMDH (Threshold One-More Diffie-Hellman) hardness assumption and proves UC security of the one-round partial evaluation + Lagrange interpolation scheme. Achieves one exponentiation per co-signer, two per requester, regardless of group size.
+
+---
+
+**[JKR18]** <a name="JKR18"></a>
+Stanislaw Jarecki, Hugo Krawczyk, and Jason Resch.
+"Threshold Partially-Oblivious PRFs with Applications to Key Management."
+Cryptology ePrint Archive, Paper 2018/733.
+https://ia.cr/2018/733
+
+Extends threshold OPRFs to the partially-oblivious setting, where a public input is mixed into the PRF evaluation. Relevant to the context-binding mechanism in Section 8.7, which incorporates a public `context` field into each randomness request.
+
+---
+
+### Standards and Specifications
+
+**[RFC9497]** <a name="RFC9497"></a>
+A. Davidson, A. Faz-Hernandez, N. Sullivan, C. A. Wood.
+"Oblivious Pseudorandom Functions (OPRFs) Using Prime-Order Groups."
+IRTF CFRG, December 2023.
+https://www.rfc-editor.org/rfc/rfc9497
+
+Normative reference for the single-signer VOPRF and the DLEQ proof construction (Section 2.2 of the RFC, referenced in Section 8.4 of this spec). The threshold extension is not covered by this RFC; see [JKKX17].
+
+---
+
+**[RFC9591]** <a name="RFC9591"></a>
+D. Connolly, C. Komlo, I. Goldberg, C. A. Wood.
+"The Flexible Round-Optimized Schnorr Threshold (FROST) Signature Scheme."
+IRTF CFRG, June 2024.
+https://www.rfc-editor.org/rfc/rfc9591
+
+Reference for the Pedersen DKG protocol used in Sections 6.2 and 6.3.
+
+---
+
+**[RFC9380]** <a name="RFC9380"></a>
+A. Faz-Hernandez, S. Scott, N. Sullivan, R. Wahby, C. Wood.
+"Hashing to Elliptic Curves."
+IRTF CFRG, August 2023.
+https://www.rfc-editor.org/rfc/rfc9380
+
+Specifies `Hash_to_curve` used in BDHKE blinding (Section 8.1).
+
+---
+
+**[CashuNUT00]** <a name="CashuNUT00"></a>
+Cashu contributors.
+"NUT-00: Notation, Utilization, and Terminology."
+https://github.com/cashubtc/nuts/blob/main/00.md
+
+Specifies the BDHKE scheme that forms the single-signer base of the DASoR protocol (Section 8.1).
+
+---
+
+**[CashuNUT12]** <a name="CashuNUT12"></a>
+Cashu contributors.
+"NUT-12: Offline ecash signature validation."
+https://github.com/cashubtc/nuts/blob/main/12.md
+
+Specifies DLEQ proofs for single-signer Cashu blind signatures — the single-server baseline from which the threshold construction in Section 8.4 is derived.
+
+---
+
+### Prior Art and Implementations
+
+**[Fedimint]** <a name="Fedimint"></a>
+Fedimint contributors.
+"Fedimint: A Federated Chaumian Mint."
+https://github.com/fedimint/fedimint
+
+Production implementation of threshold blind signatures using Feldman secret sharing, DLEQ proofs, and Lagrange interpolation over secp256k1. The closest existing reference implementation to the DASoR protocol in Section 8.
+
+---
+
+### Note on Standardization Status
+
+The threshold extension of OPRF — distributing the signing key across multiple parties via Feldman secret sharing and reconstructing via Lagrange interpolation — is described in [[JKKX17]](#JKKX17) and implemented in [[Fedimint]](#Fedimint), but does not yet have a finalized IETF RFC. [RFC9497] covers only the single-signer case. Implementers of the DASoR protocol should treat [[JKKX17]](#JKKX17) as the primary cryptographic reference and [[Fedimint]](#Fedimint) as the primary implementation reference for the threshold variant.
