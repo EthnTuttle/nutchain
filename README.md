@@ -18,7 +18,7 @@ The engine provides:
 
 | Term | Definition |
 |------|------------|
-| **BDHKE** | Blind Diffie-Hellman Key Exchange. Cashu's blinding scheme: `B' = hash_to_curve(x) + r*G`, `C' = k*B'`, `C = C' - r*K`. Uses the `hash_to_curve` function from [[CashuNUT00]](#CashuNUT00) (try-and-increment with domain separator `Secp256k1_HashToCurve_Cashu_`) |
+| **BDHKE** | Blind Diffie-Hellman Key Exchange. Cashu's blinding scheme: `B' = hash_to_curve(x) + r*G`, where `r` is a secret scalar and `r*G` is the blinding point, `C' = k*B'`, `C = C' - r*K`. Uses the `hash_to_curve` function from [[CashuNUT00]](#CashuNUT00) (try-and-increment with domain separator `Secp256k1_HashToCurve_Cashu_`) |
 | **Threshold OPRF** | Threshold Oblivious Pseudorandom Function. Distributes the BDHKE signing key `k` across `n` parties requiring `t` to cooperate to produce a valid response |
 | **DLEQ Proof** | Discrete Log Equality proof. Proves `log_G(S_i) == log_{B'}(C'_i)` without revealing the secret share `s_i` |
 | **ChillDKG** | A distributed key generation protocol for FROST [[ChillDKG]](#ChillDKG), incorporating EncPedPop for encrypted share delivery via ECDH and CertEq for consensus via signature certificates. No trusted dealer required |
@@ -27,6 +27,7 @@ The engine provides:
 | **Signing set** | The specific subset `S` of `t` players who respond to a given `RANDOMNESS_REQUEST` |
 | **Event DAG** | The directed acyclic graph of hash-linked Nostr events that encodes all game state |
 | **Group key** | The aggregated public key `K` derived from all players' DKG commitments |
+| **Action count** | A counter incrementing with each `GAME_ACTION` event in the DAG, used to bind randomness to a specific game state |
 
 ---
 
@@ -50,14 +51,14 @@ Every NutChain event is a standard Nostr event. Per NIP-01, the `content` field 
 
 | Field | Description |
 |-------|-------------|
-| `game_id` | Unique identifier for the game instance (the `GAME_CREATE` event ID) |
+| `game_id` | Unique identifier for the game instance. A client-generated random identifier (e.g., 32-byte hex string) set in the `GAME_CREATE` `d` tag and referenced by all subsequent events |
 | `e` tag | Hash of the parent event. Enforces causal ordering in the DAG |
 | `pubkey` | Author's Nostr public key |
 | `sig` | Nostr Schnorr signature over the event |
 
 ### 4.2 Event Kind Registry
 
-These kind numbers are provisional and occupy an unregistered sub-range of Nostr's addressable event space (`30000-39999`). A formal NIP may be proposed if this protocol is adopted more broadly.
+These kind numbers are provisional and occupy an unregistered sub-range of Nostr's addressable event space (`30000-39999`). Per NIP-01, addressable events are replaceable: a relay will only store the latest event for a given `kind + pubkey + d` combination. Since each player has a unique `pubkey`, events from different players do not collide. For events where a single player may publish multiple events of the same kind within one game (e.g., `TOPRF_PARTIAL` across different rounds), the `d` tag must include a disambiguator (e.g., `game_id:request_event_id`) to prevent relay-level replacement. A formal NIP may be proposed if this protocol is adopted more broadly.
 
 | Kind | Name | Phase | Description |
 |------|------|-------|-------------|
@@ -111,17 +112,18 @@ These kind numbers are provisional and occupy an unregistered sub-range of Nostr
 
 ### 6.1 GAME_CREATE
 
-The founding player publishes the genesis event. All subsequent events reference its ID as the `game_id`.
+The founding player generates a unique `game_id` (e.g., 32 random bytes, hex-encoded) and publishes the genesis event. This `game_id` is used as the `d` tag value on all events in the game, enabling relay queries by `game_id`. All subsequent events also reference their causal parent via `e` tags.
 
 ```json
 {
   "kind": 30800,
-  "content": "{\"rules_hash\": \"<sha256 of game rule implementation>\", \"players\": [\"<nostr pubkey 1>\", \"<nostr pubkey 2>\", \"<nostr pubkey n>\"], \"frost_n\": 4, \"frost_t\": 3, \"turn_timeout_seconds\": 300}",
+  "content": "{\"rules_hash\": \"<sha256 of game rule implementation>\", \"players\": [\"<nostr pubkey 0>\", \"<nostr pubkey 1>\", \"<nostr pubkey n-1>\"], \"frost_t\": 3, \"turn_timeout_seconds\": 300}",
   "tags": [["d", "<game_id>"]]
 }
 ```
 
 - `rules_hash` — SHA-256 of the game rule implementation. All clients must run a matching implementation or their state derivations are invalid.
+- `players` — Ordered array of Nostr public keys. The array length determines `n`. Player indices are 0-based, corresponding to array position.
 - `frost_t` — signing threshold: `floor(2n/3) + 1` (Byzantine majority, consistent with Fedimint). For `n=4`, `t=3`. For `n=3`, `t=3`. For `n=7`, `t=5`.
 - `turn_timeout_seconds` — after this duration without a required event from a player, any peer may declare forfeit.
 
@@ -193,9 +195,11 @@ The coordinator publishes a `DKG_ROUND_2` event:
 {
   "kind": 30811,
   "content": "{\"game_id\": \"<game_id>\", \"coms_to_secrets\": [\"<hex com_{0,0}>\", \"<hex com_{1,0}>\", \"<hex com_{2,0}>\", \"<hex com_{3,0}>\"], \"sum_coms_nonconst\": [\"<hex sum of k=1 terms>\"], \"encrypted_share_sums\": [{\"recipient_index\": 0, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 1, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 2, \"enc_secshare\": \"<hex>\"}, {\"recipient_index\": 3, \"enc_secshare\": \"<hex>\"}], \"proofs_of_possession\": [\"<hex pop_0>\", \"<hex pop_1>\", \"<hex pop_2>\", \"<hex pop_3>\"], \"ecdh_pubkeys\": [\"<hex EK_0>\", \"<hex EK_1>\", \"<hex EK_2>\", \"<hex EK_3>\"]}",
-  "tags": [["e", "<GAME_CREATE event id>"], ["d", "<game_id>"]]
+  "tags": [["e", "<DKG_ROUND_1 event id player 0>"], ["e", "<DKG_ROUND_1 event id player 1>"], ["e", "<DKG_ROUND_1 event id player n-1>"], ["d", "<game_id>"]]
 }
 ```
+
+The `e` tags reference all `DKG_ROUND_1` events that were aggregated, establishing the causal dependency in the DAG.
 
 Upon receiving `DKG_ROUND_2`, each player `j`:
 
@@ -252,9 +256,11 @@ Any player publishes `GAME_START` once the success certificate is complete:
 {
   "kind": 30813,
   "content": "{\"game_id\": \"<game_id>\", \"group_pubkey\": \"<hex K>\", \"success_certificate\": [\"<hex certeq_sig_0>\", \"<hex certeq_sig_1>\", \"<hex certeq_sig_2>\", \"<hex certeq_sig_3>\"], \"transcript_hash\": \"<SHA-256 of session transcript>\"}",
-  "tags": [["e", "<GAME_CREATE event id>"], ["d", "<game_id>"]]
+  "tags": [["e", "<DKG_CERTIFY event id player 0>"], ["e", "<DKG_CERTIFY event id player 1>"], ["e", "<DKG_CERTIFY event id player n-1>"], ["d", "<game_id>"]]
 }
 ```
+
+The `e` tags reference all `DKG_CERTIFY` events, establishing that `GAME_START` causally depends on every player's certification.
 
 `K` is immutable for the lifetime of the game. No key changes are permitted after `GAME_START` is published. Game rules begin applying to events published after this point.
 
@@ -302,10 +308,10 @@ The base single-signer scheme, using `hash_to_curve` as defined in [[CashuNUT00]
 Blinding:   B' = hash_to_curve(x) + r*G
 Signing:    C' = k * B'
 Unblinding: C  = C' - r*K  =  k * hash_to_curve(x)
-Verify:     C  == k * hash_to_curve(x)  using public key K = k*G
+Identity:   C  == k * hash_to_curve(x)  where K = k*G
 ```
 
-`C` is a deterministic function of `x` and `k`. Neither `x` (known only to the player) nor `k` (held as shares across players) alone determines the output.
+`C` is a deterministic function of `x` and `k`. Neither `x` (known only to the player) nor `k` (held as shares across players) alone determines the output. Note that the identity line describes the mathematical relationship, not a verification procedure — no single party knows `k`. In the threshold setting, correctness is verified via DLEQ proofs on each partial evaluation (see Section 8.4).
 
 **Threshold OPRF:**
 
@@ -327,7 +333,7 @@ FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requi
 | Requester cannot bias the outcome | Requester controls `x` but not `k`; cannot evaluate `k*hash_to_curve(x)` without co-signers |
 | Co-signers cannot bias the outcome | Co-signers sign the blinded `B'` without knowing `x`; cannot evaluate the result |
 | Grinding is mitigated | `SHA-256(x)` committed on-chain before any partial response is returned |
-| Tokens are context-bound | Each signing request commits to `(game_id, turn, action_type, parent_event_hash)` |
+| Tokens are context-bound | Each signing request commits to `(game_id, action_count, action_type, parent_event_hash)` |
 | Partial responses are individually verifiable | DLEQ proofs allow anyone to reject invalid partial evaluations |
 
 ### 8.3 Protocol Flow
@@ -338,7 +344,7 @@ FROST produces `(R, z)` Schnorr signature pairs. The BDHKE unblinding step requi
 2. Player publishes RANDOMNESS_REQUEST (kind 30803):
      commitment = SHA-256(x)
      B'         = hash_to_curve(x) + r*G    (r = secret blinding factor)
-     context    = SHA-256("NUTCHAIN_CTX_v1" || game_id || turn_number || action_type || parent_event_hash)
+     context    = SHA-256("NUTCHAIN_CTX_v1" || game_id || action_count || action_type || parent_event_hash)
      num_values = number of derived random values this action will consume
 
 3. Each co-signer i in signing set S (|S| = t) publishes TOPRF_PARTIAL (kind 30804):
@@ -435,16 +441,18 @@ A `TOPRF_PARTIAL` event whose proof fails this check is invalid and must be igno
 
 #### Lagrange Interpolation
 
-Given signing set `S ⊆ {1..n}` with `|S| = t`, the Lagrange coefficient for signer `i` evaluated at `0` is:
+Player indices are 0-based (`{0, 1, ..., n-1}`), but each player `i`'s secret share is the polynomial evaluated at point `i+1` (i.e., `f(1), f(2), ..., f(n)`). This ensures no player holds `f(0) = k`, the group secret. Lagrange interpolation uses these evaluation points, not the raw indices.
+
+Given signing set `S` with evaluation points `P_S = {i+1 : i ∈ S}` and `|S| = t`, the Lagrange coefficient for evaluation point `p` at target `0` is:
 
 ```
-λ_i = Π_{j∈S, j≠i} (0 - j) / (i - j)   (mod group order q)
+λ_p = Π_{j∈P_S, j≠p} (-j) / (p - j)   (mod group order)
 ```
 
-The aggregated blind evaluation:
+The aggregated blind evaluation (using player index `i` where evaluation point is `i+1`):
 
 ```
-C' = Σ_{i∈S} λ_i * C'_i
+C' = Σ_{i∈S} λ_{i+1} * C'_i
 ```
 
 The choice of signing set `S` does not affect the result — any `t` valid partial evaluations produce the same `C'`. Requesters should use the first `t` valid `TOPRF_PARTIAL` events received.
@@ -455,9 +463,11 @@ The choice of signing set `S` does not affect the result — any `t` valid parti
 {
   "kind": 30804,
   "content": "{\"game_id\": \"<game_id>\", \"randomness_request_event_id\": \"<event id of RANDOMNESS_REQUEST>\", \"player_index\": 2, \"partial_response\": \"<hex C'_i>\", \"public_key_share\": \"<hex S_i>\", \"dleq_proof\": {\"e\": \"<hex scalar>\", \"s\": \"<hex scalar>\"}}",
-  "tags": [["e", "<RANDOMNESS_REQUEST event id>"], ["d", "<game_id>"]]
+  "tags": [["e", "<RANDOMNESS_REQUEST event id>"], ["d", "<game_id>:<RANDOMNESS_REQUEST event id>"]]
 }
 ```
+
+The `d` tag uses a compound key to prevent relay-level replacement when a player produces `TOPRF_PARTIAL` events for multiple randomness requests within the same game (see Section 4.2).
 
 ### 8.5 Multi-Value Derivation
 
@@ -499,7 +509,7 @@ All `RANDOMNESS_REQUEST` events are permanently on-chain. Repeated requests agai
 Each randomness token is cryptographically bound to a unique game context:
 
 ```
-context = SHA-256("NUTCHAIN_CTX_v1" || game_id || turn_number || action_type || parent_event_hash)
+context = SHA-256("NUTCHAIN_CTX_v1" || game_id || action_count || action_type || parent_event_hash)
 ```
 
 Co-signers must verify the context in `RANDOMNESS_REQUEST` matches the current game state before producing a partial response. A `TOPRF_PARTIAL` produced for an invalid or stale context is itself invalid.
@@ -508,9 +518,9 @@ Verifiers reject `RANDOMNESS_REVEAL` events whose context does not match the gam
 
 ### 8.8 Worked Example (n=4, t=3)
 
-**Setup:** 4 players with indices `{1, 2, 3, 4}`. Threshold `t = floor(8/3) + 1 = 3`. Player 4 is offline.
+**Setup:** 4 players with indices `{0, 1, 2, 3}`, corresponding to evaluation points `{1, 2, 3, 4}`. Threshold `t = floor(8/3) + 1 = 3`. Player 3 is offline.
 
-**Signing set:** `S = {1, 2, 3}`
+**Signing set:** Players `{0, 1, 2}`, evaluation points `P_S = {1, 2, 3}`
 
 **Lagrange coefficients at 0** (mod group order `q`):
 
@@ -535,26 +545,28 @@ Verifiers reject `RANDOMNESS_REVEAL` events whose context does not match the gam
 **Reconstruction:**
 
 ```
-C' = 3*C'_1 + (-3)*C'_2 + 1*C'_3
+C' = 3*C'_0 + (-3)*C'_1 + 1*C'_2
 ```
+
+*(where `C'_i` is the partial evaluation from player `i`, weighted by the Lagrange coefficient for that player's evaluation point)*
 
 **Full flow:**
 
 ```
-Player 1 generates x, computes B' = hash_to_curve(x) + r*G
-Player 1 publishes RANDOMNESS_REQUEST (commitment, B', context)
+Player 0 generates x, computes B' = hash_to_curve(x) + r*G
+Player 0 publishes RANDOMNESS_REQUEST (commitment, B', context)
 
+Player 0 computes C'_0 = s_0 * B', generates π_0, publishes TOPRF_PARTIAL
 Player 1 computes C'_1 = s_1 * B', generates π_1, publishes TOPRF_PARTIAL
 Player 2 computes C'_2 = s_2 * B', generates π_2, publishes TOPRF_PARTIAL
-Player 3 computes C'_3 = s_3 * B', generates π_3, publishes TOPRF_PARTIAL
-(Player 4 offline — not needed, t=3 satisfied)
+(Player 3 offline — not needed, t=3 satisfied)
 
-Player 1 verifies π_1, π_2, π_3 against S_1, S_2, S_3
-Player 1 computes C' = 3*C'_1 - 3*C'_2 + 1*C'_3
-Player 1 publishes RANDOMNESS_RESPONSE (C')
+Player 0 verifies π_0, π_1, π_2 against S_0, S_1, S_2
+Player 0 computes C' = 3*C'_0 - 3*C'_1 + 1*C'_2
+Player 0 publishes RANDOMNESS_RESPONSE (C')
 
-Player 1 computes C = C' - r*K
-Player 1 publishes RANDOMNESS_REVEAL (x, r, C)
+Player 0 computes C = C' - r*K
+Player 0 publishes RANDOMNESS_REVEAL (x, r, C)
 
 Anyone verifies:
   a. SHA-256(x) matches RANDOMNESS_REQUEST commitment        ✓
@@ -624,7 +636,7 @@ When a forfeit condition is met, any peer may publish `GAME_END` citing the time
 | Single player biases randomness | Threshold OPRF: biasing `C'` requires controlling `t` secret shares |
 | Requesting player grinds for favorable `x` | Public `SHA-256(x)` commitment precedes any partial response; abandonment triggers forfeit |
 | Co-signer produces invalid partial response | DLEQ proof is published alongside `C'_i`; invalid proofs are verifiably rejected |
-| Token reused across game contexts | Context field `SHA-256("NUTCHAIN_CTX_v1" \|\| game_id \|\| turn \|\| action_type \|\| parent_event_hash)` uniquely binds each token |
+| Token reused across game contexts | Context field `SHA-256("NUTCHAIN_CTX_v1" \|\| game_id \|\| action_count \|\| action_type \|\| parent_event_hash)` uniquely binds each token |
 | Player abandons after learning seed | Timeout + forfeit; outcome of revealed seed is recorded in `RANDOMNESS_REVEAL` on-chain |
 | Coalition of `t-1` players colludes | Insufficient shares to reconstruct `k`; OPRF output is computationally indistinguishable from random |
 | Coalition of `t` or more players colludes | Threshold does not prevent this; `t = floor(2n/3) + 1` makes this a strict Byzantine majority |
@@ -662,7 +674,7 @@ All hash operations in NutChain are domain-separated to prevent cross-protocol a
 
 ### Public Key Share Derivation
 
-Public key shares `S_j` are computable by any verifier from the DKG commitments, without any private information:
+Public key shares `S_j` for player `j` (0-indexed) are computable by any verifier from the DKG commitments, without any private information. The evaluation point is `j+1` (never 0, since `f(0) = k` is the group secret):
 
 ```
 S_j = Σ_{k=0}^{t-1} sum_coms[k] * (j+1)^k
